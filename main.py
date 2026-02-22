@@ -1,33 +1,44 @@
-from fastapi import FastAPI, Query, Response
 import yt_dlp
-import os
+import requests
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import StreamingResponse
 
 app = FastAPI()
 
 @app.get("/download")
 def download_video(url: str = Query(...)):
-
+    # 1. Get the direct URL of the video file
     ydl_opts = {
-        'format': 'best[ext=mp4]',
+        'format': 'best[ext=mp4]/best', 
         'quiet': True,
-        'no_warnings': True,
-        'outtmpl': 'temp_video.%(ext)s',
         'noplaylist': True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            info = ydl.extract_info(url, download=False) # Don't download to server!
+            video_direct_url = info.get('url')
+            
+            if not video_direct_url:
+                raise HTTPException(status_code=404, detail="Could not extract video URL")
 
-        # Read the file and stream to client
-        with open(filename, "rb") as f:
-            data = f.read()
+        # 2. Open a streaming connection to the source
+        # We use stream=True so we don't load the whole file into RAM
+        source_response = requests.get(video_direct_url, stream=True, timeout=60)
 
-        # Delete temp file
-        os.remove(filename)
+        # 3. Forward the stream to the Android app
+        def iter_content():
+            for chunk in source_response.iter_content(chunk_size=1024 * 64):
+                yield chunk
 
-        return Response(content=data, media_type="video/mp4")
+        return StreamingResponse(
+            iter_content(),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="video.mp4"',
+                "Content-Length": source_response.headers.get("Content-Length", "")
+            }
+        )
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
