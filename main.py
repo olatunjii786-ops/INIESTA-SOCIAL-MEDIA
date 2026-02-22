@@ -1,57 +1,38 @@
 import yt_dlp
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse
+import os
+import uuid
 
 app = FastAPI()
 
-YDL_OPTS = {
-    "format": "best[ext=mp4]/best",
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-}
-
-@app.get("/")
-def root():
-    return {"status": "Backend running"}
-
-@app.get("/info")
-def get_video_info(url: str = Query(...)):
-    """
-    Returns video metadata + direct download URL
-    """
-    try:
-        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        return JSONResponse({
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "uploader": info.get("uploader"),
-            "video_url": info.get("url")
-        })
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+DOWNLOAD_FOLDER = "downloads"
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 @app.get("/download")
 def download_video(url: str = Query(...)):
-    """
-    Redirects user directly to TikTok CDN
-    This avoids Railway IP block
-    """
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-            info = ydl.extract_info(url, download=False)
-            video_url = info.get("url")
+        filename = f"{uuid.uuid4()}.mp4"
+        filepath = os.path.join(DOWNLOAD_FOLDER, filename)
 
-        if not video_url:
-            raise HTTPException(status_code=400, detail="Could not extract video")
+        ydl_opts = {
+            "format": "best[ext=mp4]/best",
+            "outtmpl": filepath,
+            "quiet": True,
+            "noplaylist": True,
+        }
 
-        # Redirect user directly to TikTok video file
-        return RedirectResponse(video_url)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        if not os.path.exists(filepath):
+            raise HTTPException(status_code=500, detail="Download failed")
+
+        return FileResponse(
+            path=filepath,
+            media_type="video/mp4",
+            filename="video.mp4"
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
