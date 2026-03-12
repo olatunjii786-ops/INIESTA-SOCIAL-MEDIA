@@ -1,4 +1,6 @@
 fastapi
+flask 
+flask-cors
 uvicorn
 yt-dlp
 requests
