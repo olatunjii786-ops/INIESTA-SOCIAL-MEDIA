@@ -1,15 +1,21 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
+# Install ffmpeg
+RUN apt-get update && apt-get install -y ffmpeg \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
 WORKDIR /app
 
-# Install ffmpeg for yt-dlp
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-
+# Copy files
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Render uses PORT env
 ENV PORT=10000
 
-CMD gunicorn app:app --bind 0.0.0.0:$PORT
+# Start server
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--workers", "2", "--threads", "4"]
