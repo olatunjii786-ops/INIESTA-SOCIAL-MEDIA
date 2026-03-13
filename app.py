@@ -63,15 +63,15 @@ def get_info():
     if not url:
         return jsonify({'success': False, 'error': 'URL parameter required'}), 400
     
-    # Enhanced options for info extraction
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
-        'impersonate': 'chrome-131',  # For TikTok
+        'impersonate': 'chrome-131',
         'headers': {
-            'Referer': 'https://www.tiktok.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
         }
     }
     
@@ -79,7 +79,6 @@ def get_info():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # Get available formats
             formats = []
             for f in info.get('formats', []):
                 if f.get('height') or f.get('format_note'):
@@ -101,7 +100,9 @@ def get_info():
                 'formats': formats[:15]
             })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        error_msg = str(e)
+        logging.error(f"Info error: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/download')
 @rate_limit
@@ -113,25 +114,23 @@ def download():
     if not url:
         return jsonify({'success': False, 'error': 'URL parameter required'}), 400
     
-    # Create unique temp directory
     temp_dir = tempfile.mkdtemp()
     
-    # Enhanced options for download with TikTok impersonation
     ydl_opts = {
         'outtmpl': os.path.join(temp_dir, '%(title)s_%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
-        'retries': 3,
-        'fragment_retries': 3,
-        'impersonate': 'chrome-131',  # CRITICAL for TikTok
+        'retries': 5,
+        'fragment_retries': 5,
+        'impersonate': 'chrome-131',
         'headers': {
-            'Referer': 'https://www.tiktok.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
         }
     }
     
-    # Handle different download types
     if download_type == 'audio':
         ydl_opts.update({
             'format': 'bestaudio/best',
@@ -149,39 +148,34 @@ def download():
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info and download
             info = ydl.extract_info(url, download=True)
             
-            # Find the downloaded file
+            if not info:
+                raise Exception("Failed to extract video info")
+            
             if download_type == 'audio':
-                filename = os.path.join(temp_dir, f"{info['title']} [{info['id']}].mp3")
+                filename = os.path.join(temp_dir, f"{info.get('title', 'audio')}_{info.get('id', 'unknown')}.mp3")
             else:
                 filename = ydl.prepare_filename(info)
-                # Handle case where file extension might be different
                 if not os.path.exists(filename):
                     base = filename.rsplit('.', 1)[0]
-                    possible_extensions = ['.mp4', '.webm', '.mkv']
-                    for ext in possible_extensions:
+                    for ext in ['.mp4', '.webm', '.mkv']:
                         if os.path.exists(base + ext):
                             filename = base + ext
                             break
             
             if not os.path.exists(filename):
-                # Try to find any file in temp_dir
                 files = os.listdir(temp_dir)
                 if files:
                     filename = os.path.join(temp_dir, files[0])
                 else:
                     raise Exception("Downloaded file not found")
             
-            # Get file size
             file_size = os.path.getsize(filename)
             
-            # Read file into memory
             with open(filename, 'rb') as f:
                 file_data = f.read()
             
-            # Clean up file
             @after_this_request
             def cleanup(response):
                 def remove_files():
@@ -190,33 +184,39 @@ def download():
                         if os.path.exists(filename):
                             os.unlink(filename)
                         os.rmdir(temp_dir)
-                        logging.info(f"Cleaned up {temp_dir}")
                     except Exception as e:
                         logging.error(f"Cleanup error: {e}")
                 threading.Thread(target=remove_files).start()
                 return response
             
-            # Determine extension for download name
             ext = filename.split('.')[-1]
-            download_name = f"{info.get('title', 'video')}.{ext}"
+            download_name = f"{info.get('title', 'video').replace('/', '_')}.{ext}"
             
-            # Send file
             response = send_file(
                 io.BytesIO(file_data),
                 as_attachment=True,
                 download_name=download_name,
                 mimetype='application/octet-stream'
             )
-            response.headers['Content-Length'] = file_size
+            response.headers['Content-Length'] = str(file_size)
             return response
             
     except Exception as e:
-        # Clean up on error
         try:
             os.rmdir(temp_dir)
         except:
             pass
-        return jsonify({'success': False, 'error': str(e)}), 500
+        
+        error_msg = str(e)
+        logging.error(f"Download error: {error_msg}")
+        
+        if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
+            return jsonify({
+                'success': False, 
+                'error': 'Platform is blocking automated downloads. Try again later.'
+            }), 503
+        else:
+            return jsonify({'success': False, 'error': error_msg}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
