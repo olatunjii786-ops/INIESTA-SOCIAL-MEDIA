@@ -1,18 +1,20 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, after_this_request
 from flask_cors import CORS
 import yt_dlp
 import os
 import tempfile
 import uuid
-import logging
+import threading
 import time
+import logging
+import io
 from functools import wraps
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# Simple rate limiting
+# Rate limiting
 rate_limit_dict = {}
 RATE_LIMIT = 10
 TIME_WINDOW = 60
@@ -46,7 +48,7 @@ def home():
         'message': 'INIESTA Downloader API is running',
         'endpoints': {
             '/info': 'GET with ?url= to get video info',
-            '/download': 'GET with ?url= to download video'
+            '/download': 'GET with ?url=&format= to download'
         }
     })
 
@@ -61,10 +63,16 @@ def get_info():
     if not url:
         return jsonify({'success': False, 'error': 'URL parameter required'}), 400
     
+    # Enhanced options for info extraction
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
+        'impersonate': 'chrome-131',  # For TikTok
+        'headers': {
+            'Referer': 'https://www.tiktok.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        }
     }
     
     try:
@@ -79,7 +87,9 @@ def get_info():
                         'format_id': f.get('format_id'),
                         'ext': f.get('ext'),
                         'quality': f.get('format_note', str(f.get('height', 'unknown'))),
-                        'filesize': f.get('filesize', 0)
+                        'filesize': f.get('filesize', 0),
+                        'vcodec': f.get('vcodec', 'none'),
+                        'acodec': f.get('acodec', 'none')
                     })
             
             return jsonify({
@@ -88,7 +98,7 @@ def get_info():
                 'uploader': info.get('uploader', 'Unknown'),
                 'duration': info.get('duration', 0),
                 'thumbnail': info.get('thumbnail', ''),
-                'formats': formats[:10]
+                'formats': formats[:15]
             })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -98,25 +108,44 @@ def get_info():
 def download():
     url = request.args.get('url')
     format_id = request.args.get('format', 'best')
+    download_type = request.args.get('type', 'video')
     
     if not url:
         return jsonify({'success': False, 'error': 'URL parameter required'}), 400
     
     # Create unique temp directory
     temp_dir = tempfile.mkdtemp()
-    temp_template = os.path.join(temp_dir, '%(title)s_%(id)s.%(ext)s')
     
+    # Enhanced options for download with TikTok impersonation
     ydl_opts = {
-        'outtmpl': temp_template,
-        'format': 'best[ext=mp4]/best',
+        'outtmpl': os.path.join(temp_dir, '%(title)s_%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
         'retries': 3,
+        'fragment_retries': 3,
+        'impersonate': 'chrome-131',  # CRITICAL for TikTok
+        'headers': {
+            'Referer': 'https://www.tiktok.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        }
     }
     
-    if format_id and format_id != 'best':
-        ydl_opts['format'] = format_id
+    # Handle different download types
+    if download_type == 'audio':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        })
+    else:
+        if format_id and format_id != 'best':
+            ydl_opts['format'] = format_id
+        else:
+            ydl_opts['format'] = 'best[ext=mp4]/best'
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -124,16 +153,18 @@ def download():
             info = ydl.extract_info(url, download=True)
             
             # Find the downloaded file
-            filename = ydl.prepare_filename(info)
-            
-            # Handle case where file extension might be different
-            if not os.path.exists(filename):
-                base = filename.rsplit('.', 1)[0]
-                possible_extensions = ['.mp4', '.webm', '.mkv']
-                for ext in possible_extensions:
-                    if os.path.exists(base + ext):
-                        filename = base + ext
-                        break
+            if download_type == 'audio':
+                filename = os.path.join(temp_dir, f"{info['title']} [{info['id']}].mp3")
+            else:
+                filename = ydl.prepare_filename(info)
+                # Handle case where file extension might be different
+                if not os.path.exists(filename):
+                    base = filename.rsplit('.', 1)[0]
+                    possible_extensions = ['.mp4', '.webm', '.mkv']
+                    for ext in possible_extensions:
+                        if os.path.exists(base + ext):
+                            filename = base + ext
+                            break
             
             if not os.path.exists(filename):
                 # Try to find any file in temp_dir
@@ -146,16 +177,24 @@ def download():
             # Get file size
             file_size = os.path.getsize(filename)
             
-            # Read file and delete after sending
+            # Read file into memory
             with open(filename, 'rb') as f:
                 file_data = f.read()
             
-            # Clean up
-            try:
-                os.unlink(filename)
-                os.rmdir(temp_dir)
-            except:
-                pass
+            # Clean up file
+            @after_this_request
+            def cleanup(response):
+                def remove_files():
+                    time.sleep(5)
+                    try:
+                        if os.path.exists(filename):
+                            os.unlink(filename)
+                        os.rmdir(temp_dir)
+                        logging.info(f"Cleaned up {temp_dir}")
+                    except Exception as e:
+                        logging.error(f"Cleanup error: {e}")
+                threading.Thread(target=remove_files).start()
+                return response
             
             # Determine extension for download name
             ext = filename.split('.')[-1]
