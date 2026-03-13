@@ -1,7 +1,4 @@
-fastapi
-flask 
-flask-cors
-uvicorn
-yt-dlp
-requests
-gunicorn
+Flask==2.3.3
+Flask-CORS==4.0.0
+yt-dlp==2024.10.22
+gunicorn==21.2.0
