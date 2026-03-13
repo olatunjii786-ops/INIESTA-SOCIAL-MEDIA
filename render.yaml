@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: iniesta-downloader
+    name: iniesta-downloader-api
     runtime: docker
     plan: free
-    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.12
+        value: 3.11
+
+    healthCheckPath: /health
