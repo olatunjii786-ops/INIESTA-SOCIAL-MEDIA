@@ -1,5 +1,5 @@
 Flask==2.3.3
 Flask-CORS==4.0.0
-yt-dlp>=2024.10.22
+yt-dlp
 gunicorn==21.2.0
-curl-cffi>=0.7.1
+curl-cffi
