@@ -1,28 +1,17 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+.env
+
 venv/
 env/
-ENV/
 
-# Virtual environment
-venv/
-env/
+node_modules/
 
-# IDE
-.vscode/
-.idea/
+*.log
 
-# OS
 .DS_Store
-Thumbs.db
-
-# Project specific
-*.mp4
-*.mp3
-*.webm
-*.mkv
-temp_downloads/
