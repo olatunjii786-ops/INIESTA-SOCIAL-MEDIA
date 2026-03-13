@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, after_this_request
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
 import os
@@ -7,217 +7,214 @@ import uuid
 import threading
 import time
 import logging
-import io
 from functools import wraps
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
+# -------------------------
 # Rate limiting
-rate_limit_dict = {}
-RATE_LIMIT = 10
+# -------------------------
+
+RATE_LIMIT = 15
 TIME_WINDOW = 60
+rate_limit_data = {}
 
 def rate_limit(f):
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def wrapper(*args, **kwargs):
         ip = request.remote_addr
-        current_time = time.time()
-        
-        if ip in rate_limit_dict:
-            rate_limit_dict[ip] = [t for t in rate_limit_dict[ip] 
-                                  if current_time - t < TIME_WINDOW]
-        else:
-            rate_limit_dict[ip] = []
-        
-        if len(rate_limit_dict[ip]) >= RATE_LIMIT:
-            return jsonify({
-                'success': False, 
-                'error': 'Rate limit exceeded. Try again in a minute.'
-            }), 429
-        
-        rate_limit_dict[ip].append(current_time)
-        return f(*args, **kwargs)
-    return decorated_function
+        now = time.time()
 
-@app.route('/')
+        if ip not in rate_limit_data:
+            rate_limit_data[ip] = []
+
+        rate_limit_data[ip] = [t for t in rate_limit_data[ip] if now - t < TIME_WINDOW]
+
+        if len(rate_limit_data[ip]) >= RATE_LIMIT:
+            return jsonify({
+                "success": False,
+                "error": "Too many requests. Try again later."
+            }), 429
+
+        rate_limit_data[ip].append(now)
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+# -------------------------
+# Root
+# -------------------------
+
+@app.route("/")
 def home():
     return jsonify({
-        'success': True,
-        'message': 'INIESTA Downloader API is running',
-        'endpoints': {
-            '/info': 'GET with ?url= to get video info',
-            '/download': 'GET with ?url=&format= to download'
+        "success": True,
+        "name": "INIESTA Downloader PRO",
+        "supported_sites": "1000+ sites",
+        "endpoints": {
+            "/info?url=": "Get video info",
+            "/download?url=": "Download best video",
+            "/download?url=&type=audio": "Download audio"
         }
     })
 
-@app.route('/health')
+
+# -------------------------
+# Health check
+# -------------------------
+
+@app.route("/health")
 def health():
-    return jsonify({'status': 'healthy'}), 200
+    return jsonify({"status": "ok"})
 
-@app.route('/info')
+
+# -------------------------
+# Info endpoint
+# -------------------------
+
+@app.route("/info")
 @rate_limit
-def get_info():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'success': False, 'error': 'URL parameter required'}), 400
-    
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': True,
-        'impersonate': 'chrome-131',
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-us,en;q=0.5',
-        }
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            formats = []
-            for f in info.get('formats', []):
-                if f.get('height') or f.get('format_note'):
-                    formats.append({
-                        'format_id': f.get('format_id'),
-                        'ext': f.get('ext'),
-                        'quality': f.get('format_note', str(f.get('height', 'unknown'))),
-                        'filesize': f.get('filesize', 0),
-                        'vcodec': f.get('vcodec', 'none'),
-                        'acodec': f.get('acodec', 'none')
-                    })
-            
-            return jsonify({
-                'success': True,
-                'title': info.get('title', 'Unknown'),
-                'uploader': info.get('uploader', 'Unknown'),
-                'duration': info.get('duration', 0),
-                'thumbnail': info.get('thumbnail', ''),
-                'formats': formats[:15]
-            })
-    except Exception as e:
-        error_msg = str(e)
-        logging.error(f"Info error: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg}), 500
+def info():
 
-@app.route('/download')
+    url = request.args.get("url")
+
+    if not url:
+        return jsonify({
+            "success": False,
+            "error": "Missing URL"
+        }), 400
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True
+    }
+
+    try:
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            data = ydl.extract_info(url, download=False)
+
+        formats = []
+
+        for f in data.get("formats", []):
+            formats.append({
+                "format_id": f.get("format_id"),
+                "ext": f.get("ext"),
+                "resolution": f.get("resolution") or f.get("format_note"),
+                "filesize": f.get("filesize"),
+                "vcodec": f.get("vcodec"),
+                "acodec": f.get("acodec")
+            })
+
+        return jsonify({
+            "success": True,
+            "title": data.get("title"),
+            "duration": data.get("duration"),
+            "uploader": data.get("uploader"),
+            "thumbnail": data.get("thumbnail"),
+            "formats": formats[:20]
+        })
+
+    except Exception as e:
+        logging.error(str(e))
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# -------------------------
+# Download endpoint
+# -------------------------
+
+@app.route("/download")
 @rate_limit
 def download():
-    url = request.args.get('url')
-    format_id = request.args.get('format', 'best')
-    download_type = request.args.get('type', 'video')
-    
+
+    url = request.args.get("url")
+    download_type = request.args.get("type", "video")
+
     if not url:
-        return jsonify({'success': False, 'error': 'URL parameter required'}), 400
-    
+        return jsonify({
+            "success": False,
+            "error": "Missing URL"
+        }), 400
+
     temp_dir = tempfile.mkdtemp()
-    
+    unique = str(uuid.uuid4())
+
+    output = os.path.join(temp_dir, f"{unique}.%(ext)s")
+
     ydl_opts = {
-        'outtmpl': os.path.join(temp_dir, '%(title)s_%(id)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-        'ignoreerrors': True,
-        'retries': 5,
-        'fragment_retries': 5,
-        'impersonate': 'chrome-131',
-        'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-us,en;q=0.5',
-        }
+        "outtmpl": output,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "noplaylist": True
     }
-    
-    if download_type == 'audio':
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
+
+    if download_type == "audio":
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+        }]
     else:
-        if format_id and format_id != 'best':
-            ydl_opts['format'] = format_id
-        else:
-            ydl_opts['format'] = 'best[ext=mp4]/best'
-    
+        ydl_opts["format"] = "bestvideo+bestaudio/best"
+
     try:
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            
-            if not info:
-                raise Exception("Failed to extract video info")
-            
-            if download_type == 'audio':
-                filename = os.path.join(temp_dir, f"{info.get('title', 'audio')}_{info.get('id', 'unknown')}.mp3")
-            else:
-                filename = ydl.prepare_filename(info)
-                if not os.path.exists(filename):
-                    base = filename.rsplit('.', 1)[0]
-                    for ext in ['.mp4', '.webm', '.mkv']:
-                        if os.path.exists(base + ext):
-                            filename = base + ext
-                            break
-            
-            if not os.path.exists(filename):
-                files = os.listdir(temp_dir)
-                if files:
-                    filename = os.path.join(temp_dir, files[0])
-                else:
-                    raise Exception("Downloaded file not found")
-            
-            file_size = os.path.getsize(filename)
-            
-            with open(filename, 'rb') as f:
-                file_data = f.read()
-            
-            @after_this_request
-            def cleanup(response):
-                def remove_files():
-                    time.sleep(5)
-                    try:
-                        if os.path.exists(filename):
-                            os.unlink(filename)
-                        os.rmdir(temp_dir)
-                    except Exception as e:
-                        logging.error(f"Cleanup error: {e}")
-                threading.Thread(target=remove_files).start()
-                return response
-            
-            ext = filename.split('.')[-1]
-            download_name = f"{info.get('title', 'video').replace('/', '_')}.{ext}"
-            
-            response = send_file(
-                io.BytesIO(file_data),
-                as_attachment=True,
-                download_name=download_name,
-                mimetype='application/octet-stream'
-            )
-            response.headers['Content-Length'] = str(file_size)
-            return response
-            
-    except Exception as e:
-        try:
-            os.rmdir(temp_dir)
-        except:
-            pass
-        
-        error_msg = str(e)
-        logging.error(f"Download error: {error_msg}")
-        
-        if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
-            return jsonify({
-                'success': False, 
-                'error': 'Platform is blocking automated downloads. Try again later.'
-            }), 503
-        else:
-            return jsonify({'success': False, 'error': error_msg}), 500
+            file_path = ydl.prepare_filename(info)
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+        if download_type == "audio":
+            file_path = file_path.rsplit(".", 1)[0] + ".mp3"
+
+        if not os.path.exists(file_path):
+            files = os.listdir(temp_dir)
+            if files:
+                file_path = os.path.join(temp_dir, files[0])
+
+        filename = os.path.basename(file_path)
+
+        def cleanup():
+            time.sleep(10)
+            try:
+                os.remove(file_path)
+                os.rmdir(temp_dir)
+            except:
+                pass
+
+        threading.Thread(target=cleanup).start()
+
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=filename
+        )
+
+    except Exception as e:
+
+        logging.error(str(e))
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# -------------------------
+# Run server
+# -------------------------
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
