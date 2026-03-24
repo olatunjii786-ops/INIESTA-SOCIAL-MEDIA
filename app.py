@@ -8,24 +8,29 @@ CORS(app)
 
 @app.route('/download')
 def get_link():
-    video_url = request.args.get('url')
-    if not video_url:
+    url = request.args.get('url')
+    if not url:
         return jsonify({"success": False, "error": "No URL"}), 400
 
-    # PRO SETTINGS: These headers bypass most "Bot" blocks
     ydl_opts = {
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
+        # TRICK THE BOT DETECTOR:
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'referer': 'https://www.google.com/',
         'nocheckcertificate': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+        }
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+            info = ydl.extract_info(url, download=False)
             return jsonify({
                 "success": True,
                 "download_url": info.get('url'),
