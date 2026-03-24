@@ -1,12 +1,13 @@
 services:
   - type: web
-    name: iniesta-downloader-api
+    name: iniesta-smdl-pro
     runtime: docker
     plan: free
-    autoDeploy: true
-
+    region: ohio
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
-
-    healthCheckPath: /health
+      - key: PORT
+        value: 10000
+    # This auto-restarts if the server crashes
+    autoDeploy: true
