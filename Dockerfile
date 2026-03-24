@@ -1,22 +1,20 @@
+# Use a lightweight Python image
 FROM python:3.11-slim
 
-# Install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg \
-    && apt-get clean \
+# Install system dependencies (ffmpeg is needed for some sites)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy files
+# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install -U yt-dlp
 
+# Copy the rest of the code
 COPY . .
 
-# Render uses PORT env
-ENV PORT=10000
-
-# Start server
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--workers", "2", "--threads", "4"]
+# Run the app with Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "app:app"]
