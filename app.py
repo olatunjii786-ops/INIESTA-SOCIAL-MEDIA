@@ -1,220 +1,48 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-import yt_dlp
 import os
-import tempfile
-import uuid
-import threading
-import time
-import logging
-from functools import wraps
+import yt_dlp
+from flask import Flask, request, Response, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-logging.basicConfig(level=logging.INFO)
 
-# -------------------------
-# Rate limiting
-# -------------------------
+@app.route('/')
+def index():
+    return jsonify({"status": "Iniesta Server Online", "version": "2.0"})
 
-RATE_LIMIT = 15
-TIME_WINDOW = 60
-rate_limit_data = {}
+@app.route('/download')
+def download():
+    video_url = request.args.get('url')
+    download_type = request.args.get('type', 'video')
 
-def rate_limit(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        ip = request.remote_addr
-        now = time.time()
+    if not video_url:
+        return jsonify({"error": "No URL provided"}), 400
 
-        if ip not in rate_limit_data:
-            rate_limit_data[ip] = []
-
-        rate_limit_data[ip] = [t for t in rate_limit_data[ip] if now - t < TIME_WINDOW]
-
-        if len(rate_limit_data[ip]) >= RATE_LIMIT:
-            return jsonify({
-                "success": False,
-                "error": "Too many requests. Try again later."
-            }), 429
-
-        rate_limit_data[ip].append(now)
-        return f(*args, **kwargs)
-
-    return wrapper
-
-
-# -------------------------
-# Root
-# -------------------------
-
-@app.route("/")
-def home():
-    return jsonify({
-        "success": True,
-        "name": "INIESTA Downloader PRO",
-        "supported_sites": "1000+ sites",
-        "endpoints": {
-            "/info?url=": "Get video info",
-            "/download?url=": "Download best video",
-            "/download?url=&type=audio": "Download audio"
-        }
-    })
-
-
-# -------------------------
-# Health check
-# -------------------------
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-# -------------------------
-# Info endpoint
-# -------------------------
-
-@app.route("/info")
-@rate_limit
-def info():
-
-    url = request.args.get("url")
-
-    if not url:
-        return jsonify({
-            "success": False,
-            "error": "Missing URL"
-        }), 400
-
+    # Configure yt-dlp options
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True
+        'format': 'bestaudio/best' if download_type == 'audio' else 'best',
+        'quiet': True,
+        'no_warnings': True,
     }
 
     try:
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            data = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(video_url, download=False)
+            # Get the direct URL from the social media provider
+            direct_url = info.get('url')
+            title = info.get('title', 'video').replace(' ', '_')
+            ext = 'mp3' if download_type == 'audio' else info.get('ext', 'mp4')
 
-        formats = []
-
-        for f in data.get("formats", []):
-            formats.append({
-                "format_id": f.get("format_id"),
-                "ext": f.get("ext"),
-                "resolution": f.get("resolution") or f.get("format_note"),
-                "filesize": f.get("filesize"),
-                "vcodec": f.get("vcodec"),
-                "acodec": f.get("acodec")
+            # We redirect the phone directly to the source for maximum speed
+            return jsonify({
+                "success": True,
+                "download_url": direct_url,
+                "title": f"{title}.{ext}"
             })
 
-        return jsonify({
-            "success": True,
-            "title": data.get("title"),
-            "duration": data.get("duration"),
-            "uploader": data.get("uploader"),
-            "thumbnail": data.get("thumbnail"),
-            "formats": formats[:20]
-        })
-
     except Exception as e:
-        logging.error(str(e))
+        return jsonify({"success": False, "error": str(e)}), 500
 
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-# -------------------------
-# Download endpoint
-# -------------------------
-
-@app.route("/download")
-@rate_limit
-def download():
-
-    url = request.args.get("url")
-    download_type = request.args.get("type", "video")
-
-    if not url:
-        return jsonify({
-            "success": False,
-            "error": "Missing URL"
-        }), 400
-
-    temp_dir = tempfile.mkdtemp()
-    unique = str(uuid.uuid4())
-
-    output = os.path.join(temp_dir, f"{unique}.%(ext)s")
-
-    ydl_opts = {
-        "outtmpl": output,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "noplaylist": True
-    }
-
-    if download_type == "audio":
-        ydl_opts["format"] = "bestaudio/best"
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192"
-        }]
-    else:
-        ydl_opts["format"] = "bestvideo+bestaudio/best"
-
-    try:
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-
-        if download_type == "audio":
-            file_path = file_path.rsplit(".", 1)[0] + ".mp3"
-
-        if not os.path.exists(file_path):
-            files = os.listdir(temp_dir)
-            if files:
-                file_path = os.path.join(temp_dir, files[0])
-
-        filename = os.path.basename(file_path)
-
-        def cleanup():
-            time.sleep(10)
-            try:
-                os.remove(file_path)
-                os.rmdir(temp_dir)
-            except:
-                pass
-
-        threading.Thread(target=cleanup).start()
-
-        return send_file(
-            file_path,
-            as_attachment=True,
-            download_name=filename
-        )
-
-    except Exception as e:
-
-        logging.error(str(e))
-
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-# -------------------------
-# Run server
-# -------------------------
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
