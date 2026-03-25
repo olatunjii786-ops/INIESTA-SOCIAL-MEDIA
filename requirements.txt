@@ -1,5 +1,3 @@
+fastapi
+uvicorn
 yt-dlp
-flask
-flask-cors
-requests
-gunicorn
