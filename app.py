@@ -4,54 +4,57 @@ from fastapi import FastAPI, HTTPException
 
 app = FastAPI()
 
-# Configuration for our cookie files
+# Map the domains to your secret cookie files
 COOKIE_MAP = {
-    "youtube": "yt_cookies.txt",
+    "youtube.com": "yt_cookies.txt",
     "youtu.be": "yt_cookies.txt",
-    "tiktok": "tk_cookies.txt"
+    "tiktok.com": "tk_cookies.txt"
 }
 
-def get_cookie_path(url):
-    # Standard loop to check which platform the URL belongs to
-    for platform, filename in COOKIE_MAP.items():
-        if platform in url.lower():
-            # Only return if the file actually exists on your server
+def get_cookie_file(url):
+    url_lower = url.lower()
+    for domain in COOKIE_MAP:
+        if domain in url_lower:
+            filename = COOKIE_MAP[domain]
             if os.path.exists(filename):
                 return filename
     return None
 
 @app.get("/fetch")
 def fetch_video(url: str):
-    cookie_file = get_cookie_path(url)
+    if not url:
+        raise HTTPException(status_code=400, detail="No URL provided")
+
+    cookie_path = get_cookie_file(url)
     
-    # yt-dlp options
+    # yt-dlp Configuration
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'format': 'best',
+        # 'best' ensures we get a single file if possible, or merged high-quality
+        'format': 'bestvideo+bestaudio/best',
+        'merge_output_format': 'mp4',
     }
-    
-    # If we found a matching cookie file, add it to the options
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
+
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info without downloading yet
+            # We use download=False because we just want the direct link for the Android app
             info = ydl.extract_info(url, download=False)
             
             return {
                 "status": "success",
-                "title": info.get("title", "No Title"),
+                "title": info.get("title", "Universal Video"),
                 "thumbnail": info.get("thumbnail"),
-                "video_url": info.get("url"), # Direct download link
+                "download_url": info.get("url"),
                 "platform": info.get("extractor_key"),
                 "duration": info.get("duration")
             }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-    # Use 0.0.0.0 so you can access it from your phone/other devices
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/")
+def health_check():
+    return {"message": "Universal Downloader Backend is running!"}
