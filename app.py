@@ -1,353 +1,270 @@
 import os
 import re
+import time
 import yt_dlp
+import requests
+import traceback
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
-import io
-import time
-import json
-from urllib.parse import urlparse
 
 app = Flask(__name__)
 CORS(app)
 
-# Configure yt-dlp options
-YDL_OPTS = {
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': False,
-    'force_generic_extractor': False,
-    'noplaylist': True,  # Don't download playlists
+# ================= CONFIG ================= #
+
+BASE_YDL_OPTS = {
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+    "retries": 3,
+    "fragment_retries": 3,
+    "socket_timeout": 15,
+    "nocheckcertificate": True,
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0",
+    }
 }
 
-# Platform detection patterns
-PLATFORM_PATTERNS = {
-    'tiktok': r'(tiktok\.com|douyin\.com)',
-    'youtube': r'(youtube\.com|youtu\.be)',
-    'instagram': r'instagram\.com',
-    'facebook': r'facebook\.com|fb\.watch',
-    'twitter': r'twitter\.com|x\.com',
-    'reddit': r'reddit\.com',
-    'pinterest': r'pinterest\.com',
-    'vimeo': r'vimeo\.com',
-    'dailymotion': r'dailymotion\.com',
-    'twitch': r'twitch\.tv',
-}
+COOKIES_FILE = "cookies.txt"  # optional
+PROXY = None  # e.g. "http://user:pass@host:port"
+
+
+# ================= HELPERS ================= #
 
 def detect_platform(url):
-    """Detect social media platform from URL"""
-    for platform, pattern in PLATFORM_PATTERNS.items():
-        if re.search(pattern, url, re.IGNORECASE):
-            return platform
-    return 'unknown'
-
-def get_video_info(url):
-    """Extract video information using yt-dlp"""
-    ydl_opts = {
-        **YDL_OPTS,
-        'extract_flat': False,
+    patterns = {
+        "tiktok": r"(tiktok\.com|douyin\.com)",
+        "youtube": r"(youtube\.com|youtu\.be)",
+        "instagram": r"instagram\.com",
+        "facebook": r"facebook\.com|fb\.watch",
+        "twitter": r"twitter\.com|x\.com",
     }
-    
+    for name, pattern in patterns.items():
+        if re.search(pattern, url, re.IGNORECASE):
+            return name
+    return "unknown"
+
+
+def get_ydl_opts(use_cookies=False):
+    opts = BASE_YDL_OPTS.copy()
+
+    if use_cookies and os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+
+    if PROXY:
+        opts["proxy"] = PROXY
+
+    return opts
+
+
+def safe_extract(url, retries=2, use_cookies=False):
+    last_error = None
+
+    for _ in range(retries):
+        try:
+            with yt_dlp.YoutubeDL(get_ydl_opts(use_cookies)) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as e:
+            last_error = e
+
+    raise last_error
+
+
+def get_best_url(info, format_id=None):
+    formats = info.get("formats", [])
+
+    if format_id:
+        for f in formats:
+            if f.get("format_id") == format_id:
+                return f.get("url")
+
+    # Prefer mp4 with audio
+    for f in reversed(formats):
+        if f.get("ext") == "mp4" and f.get("acodec") != "none":
+            return f.get("url")
+
+    # fallback
+    for f in reversed(formats):
+        if f.get("url"):
+            return f.get("url")
+
+    return info.get("url")
+
+
+def safe_stream(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Connection": "keep-alive"
+    }
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # Extract available formats
-            formats = []
-            for f in info.get('formats', []):
-                if f.get('vcodec') != 'none':  # Video formats
-                    format_info = {
-                        'format_id': f.get('format_id'),
-                        'ext': f.get('ext'),
-                        'resolution': f.get('resolution', 'N/A'),
-                        'format_note': f.get('format_note', ''),
-                        'fps': f.get('fps', 'N/A'),
-                        'vcodec': f.get('vcodec', 'N/A'),
-                    }
-                    
-                    # Get filesize if available
-                    if f.get('filesize'):
-                        format_info['filesize'] = f['filesize']
-                        format_info['filesize_mb'] = round(f['filesize'] / (1024 * 1024), 2)
-                    elif f.get('filesize_approx'):
-                        format_info['filesize'] = f['filesize_approx']
-                        format_info['filesize_mb'] = round(f['filesize_approx'] / (1024 * 1024), 2)
-                    else:
-                        format_info['filesize_mb'] = 'Unknown'
-                    
-                    formats.append(format_info)
-            
-            # Get best audio format
-            audio_format = None
-            for f in info.get('formats', []):
-                if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                    audio_format = {
-                        'format_id': f.get('format_id'),
-                        'ext': f.get('ext'),
-                        'acodec': f.get('acodec'),
-                        'abr': f.get('abr', 'N/A'),
-                    }
-                    if f.get('filesize'):
-                        audio_format['filesize_mb'] = round(f['filesize'] / (1024 * 1024), 2)
-                    break
-            
-            # Prepare response
-            result = {
-                'success': True,
-                'platform': detect_platform(url),
-                'title': info.get('title', 'Untitled'),
-                'duration': info.get('duration'),
-                'thumbnail': info.get('thumbnail'),
-                'uploader': info.get('uploader'),
-                'upload_date': info.get('upload_date'),
-                'view_count': info.get('view_count'),
-                'like_count': info.get('like_count'),
-                'formats': formats,
-                'audio_format': audio_format,
-                'url': url
-            }
-            
-            return result
-            
+        r = requests.get(url, headers=headers, stream=True, timeout=20)
+
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+
+        return r.iter_content(chunk_size=8192), None
+
+    except requests.exceptions.RequestException as e:
+        return None, str(e)
+
+
+def clean_filename(name):
+    return re.sub(r'[^\w\s-]', '', name)
+
+
+# ================= CORE ================= #
+
+def extract_info_handler(url):
+    try:
+        # Try normal
+        try:
+            info = safe_extract(url)
+        except:
+            # Retry with cookies
+            info = safe_extract(url, use_cookies=True)
+
+        formats = []
+
+        for f in info.get("formats", []):
+            if f.get("vcodec") != "none":
+                formats.append({
+                    "format_id": f.get("format_id"),
+                    "ext": f.get("ext"),
+                    "resolution": f.get("resolution"),
+                    "filesize_mb": round(f.get("filesize", 0) / (1024*1024), 2) if f.get("filesize") else None
+                })
+
+        return {
+            "success": True,
+            "platform": detect_platform(url),
+            "title": info.get("title"),
+            "duration": info.get("duration"),
+            "thumbnail": info.get("thumbnail"),
+            "formats": formats
+        }
+
     except Exception as e:
         return {
-            'success': False,
-            'error': str(e),
-            'platform': detect_platform(url)
+            "success": False,
+            "error": "Extraction failed",
+            "details": str(e)
         }
 
-def stream_video(url, format_id=None):
-    """Stream video directly to client without saving to disk"""
-    ydl_opts = {
-        **YDL_OPTS,
-        'format': format_id if format_id else 'best[height<=720]',
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info first to get video URL
-            info = ydl.extract_info(url, download=False)
-            
-            # Get the actual video URL
-            video_url = None
-            if format_id:
-                for f in info.get('formats', []):
-                    if f.get('format_id') == format_id:
-                        video_url = f.get('url')
-                        break
-            else:
-                # Get best format
-                video_url = info.get('url')
-                if not video_url and info.get('formats'):
-                    video_url = info[-1].get('url') if info['formats'] else None
-            
-            if not video_url:
-                return None, "Could not get video URL"
-            
-            # Stream the video from the URL
-            import requests
-            response = requests.get(video_url, stream=True)
-            
-            # Get filename
-            title = re.sub(r'[^\w\s-]', '', info.get('title', 'video'))
-            ext = info.get('ext', 'mp4')
-            filename = f"{title}.{ext}"
-            
-            return response.iter_content(chunk_size=8192), filename
-            
-    except Exception as e:
-        return None, str(e)
 
-def stream_audio(url):
-    """Stream audio directly to client without saving"""
-    ydl_opts = {
-        **YDL_OPTS,
-        'format': 'bestaudio/best',
-    }
-    
+def stream_handler(url, format_id=None, audio_only=False):
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info
-            info = ydl.extract_info(url, download=False)
-            
-            # Get audio URL
-            audio_url = None
-            for f in info.get('formats', []):
-                if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                    audio_url = f.get('url')
+        # Try extraction
+        try:
+            info = safe_extract(url)
+        except:
+            info = safe_extract(url, use_cookies=True)
+
+        if audio_only:
+            media_url = None
+            for f in info.get("formats", []):
+                if f.get("acodec") != "none" and f.get("vcodec") == "none":
+                    media_url = f.get("url")
                     break
-            
-            if not audio_url:
-                return None, "Could not get audio URL"
-            
-            # Stream audio
-            import requests
-            response = requests.get(audio_url, stream=True)
-            
-            # Get filename
-            title = re.sub(r'[^\w\s-]', '', info.get('title', 'audio'))
+        else:
+            media_url = get_best_url(info, format_id)
+
+        if not media_url:
+            return None, "No media URL found"
+
+        stream, err = safe_stream(media_url)
+        if not stream:
+            return None, err
+
+        title = clean_filename(info.get("title", "media"))
+
+        if audio_only:
             filename = f"{title}.mp3"
-            
-            return response.iter_content(chunk_size=8192), filename
-            
+            content_type = "audio/mpeg"
+        else:
+            filename = f"{title}.mp4"
+            content_type = "video/mp4"
+
+        return (stream, filename, content_type)
+
     except Exception as e:
         return None, str(e)
 
-@app.route('/')
+
+# ================= ROUTES ================= #
+
+@app.route("/")
 def home():
-    """Home endpoint"""
     return jsonify({
-        'name': 'Social Media Downloader API',
-        'version': '1.0.0',
-        'supported_platforms': list(PLATFORM_PATTERNS.keys()),
-        'endpoints': {
-            '/info': 'POST - Get video information (send {"url": "video_url"})',
-            '/download': 'POST - Download video (send {"url": "video_url", "format_id": "optional"})',
-            '/download/audio': 'POST - Download audio only',
-            '/health': 'GET - Health check'
-        }
+        "status": "running",
+        "service": "yt-dlp API"
     })
 
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': time.time()})
 
-@app.route('/info', methods=['POST'])
+@app.route("/info", methods=["POST"])
 def info():
-    """Get video information without downloading"""
     data = request.get_json()
-    
-    if not data or 'url' not in data:
-        return jsonify({'success': False, 'error': 'URL is required'}), 400
-    
-    url = data['url']
-    result = get_video_info(url)
-    
-    if result['success']:
-        return jsonify(result)
-    else:
-        return jsonify(result), 400
 
-@app.route('/download', methods=['POST'])
+    if not data or "url" not in data:
+        return jsonify({"success": False, "error": "URL required"}), 400
+
+    return jsonify(extract_info_handler(data["url"]))
+
+
+@app.route("/download", methods=["POST"])
 def download():
-    """Download video - streams directly to client"""
     data = request.get_json()
-    
-    if not data or 'url' not in data:
-        return jsonify({'success': False, 'error': 'URL is required'}), 400
-    
-    url = data['url']
-    format_id = data.get('format_id')
-    
-    # Get video info first
-    info = get_video_info(url)
-    if not info['success']:
-        return jsonify(info), 400
-    
-    # Stream video
-    stream_generator, filename = stream_video(url, format_id)
-    
-    if stream_generator is None:
-        return jsonify({'success': False, 'error': filename}), 500
-    
-    # Return streaming response
-    return Response(
-        stream_with_context(stream_generator),
-        headers={
-            'Content-Disposition': f'attachment; filename="{filename}"',
-            'Content-Type': 'video/mp4'
-        }
+
+    if not data or "url" not in data:
+        return jsonify({"success": False, "error": "URL required"}), 400
+
+    result = stream_handler(
+        data["url"],
+        format_id=data.get("format_id"),
+        audio_only=False
     )
 
-@app.route('/download/audio', methods=['POST'])
+    if not result:
+        return jsonify({"success": False, "error": "Download failed"}), 500
+
+    stream, filename, content_type = result
+
+    return Response(
+        stream_with_context(stream),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content_type=content_type
+    )
+
+
+@app.route("/download/audio", methods=["POST"])
 def download_audio():
-    """Download audio only - streams directly to client"""
     data = request.get_json()
-    
-    if not data or 'url' not in data:
-        return jsonify({'success': False, 'error': 'URL is required'}), 400
-    
-    url = data['url']
-    
-    # Get video info first
-    info = get_video_info(url)
-    if not info['success']:
-        return jsonify(info), 400
-    
-    # Stream audio
-    stream_generator, filename = stream_audio(url)
-    
-    if stream_generator is None:
-        return jsonify({'success': False, 'error': filename}), 500
-    
-    # Return streaming response
+
+    if not data or "url" not in data:
+        return jsonify({"success": False, "error": "URL required"}), 400
+
+    result = stream_handler(data["url"], audio_only=True)
+
+    if not result:
+        return jsonify({"success": False, "error": "Download failed"}), 500
+
+    stream, filename, content_type = result
+
     return Response(
-        stream_with_context(stream_generator),
-        headers={
-            'Content-Disposition': f'attachment; filename="{filename}"',
-            'Content-Type': 'audio/mpeg'
-        }
+        stream_with_context(stream),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content_type=content_type
     )
 
-# Alternative: GET endpoint with URL as query parameter (for direct browser usage)
-@app.route('/download', methods=['GET'])
-def download_get():
-    """Download video via GET request (for direct browser links)"""
-    url = request.args.get('url')
-    format_id = request.args.get('format_id')
-    
-    if not url:
-        return jsonify({'success': False, 'error': 'URL parameter is required'}), 400
-    
-    # Get video info first
-    info = get_video_info(url)
-    if not info['success']:
-        return jsonify(info), 400
-    
-    # Stream video
-    stream_generator, filename = stream_video(url, format_id)
-    
-    if stream_generator is None:
-        return jsonify({'success': False, 'error': filename}), 500
-    
-    # Return streaming response
-    return Response(
-        stream_with_context(stream_generator),
-        headers={
-            'Content-Disposition': f'attachment; filename="{filename}"',
-            'Content-Type': 'video/mp4'
-        }
-    )
 
-@app.route('/download/audio', methods=['GET'])
-def download_audio_get():
-    """Download audio via GET request (for direct browser links)"""
-    url = request.args.get('url')
-    
-    if not url:
-        return jsonify({'success': False, 'error': 'URL parameter is required'}), 400
-    
-    # Get video info first
-    info = get_video_info(url)
-    if not info['success']:
-        return jsonify(info), 400
-    
-    # Stream audio
-    stream_generator, filename = stream_audio(url)
-    
-    if stream_generator is None:
-        return jsonify({'success': False, 'error': filename}), 500
-    
-    # Return streaming response
-    return Response(
-        stream_with_context(stream_generator),
-        headers={
-            'Content-Disposition': f'attachment; filename="{filename}"',
-            'Content-Type': 'audio/mpeg'
-        }
-    )
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "time": time.time()})
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+
+# ================= RUN ================= #
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
