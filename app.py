@@ -1,63 +1,57 @@
-from flask import Flask, request, Response, jsonify
-import requests
+import os
 import yt_dlp
+from fastapi import FastAPI, HTTPException
 
-app = Flask(__name__)
+app = FastAPI()
 
-def extract_url(video_url):
+# Configuration for our cookie files
+COOKIE_MAP = {
+    "youtube": "yt_cookies.txt",
+    "youtu.be": "yt_cookies.txt",
+    "tiktok": "tk_cookies.txt"
+}
+
+def get_cookie_path(url):
+    # Standard loop to check which platform the URL belongs to
+    for platform, filename in COOKIE_MAP.items():
+        if platform in url.lower():
+            # Only return if the file actually exists on your server
+            if os.path.exists(filename):
+                return filename
+    return None
+
+@app.get("/fetch")
+def fetch_video(url: str):
+    cookie_file = get_cookie_path(url)
+    
+    # yt-dlp options
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "format": "best"
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'best',
     }
+    
+    # If we found a matching cookie file, add it to the options
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            return info["url"]
-    except:
-        return None
-
-
-@app.route("/download", methods=["GET"])
-def download():
-    video_url = request.args.get("url")
-
-    if not video_url:
-        return jsonify({"error": "Missing URL"}), 400
-
-    media_url = extract_url(video_url)
-
-    if not media_url:
-        return jsonify({"error": "Extraction failed"}), 500
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": video_url
-    }
-
-    try:
-        r = requests.get(media_url, stream=True, headers=headers, timeout=20)
-
-        if r.status_code != 200:
-            return jsonify({"error": "Blocked by source"}), 403
-
-        content_type = r.headers.get("Content-Type", "")
-
-        if "text/html" in content_type:
-            return jsonify({"error": "Invalid response (HTML blocked)"}), 500
-
-        return Response(
-            r.iter_content(chunk_size=8192),
-            content_type=content_type,
-            headers={
-                "Content-Disposition": "attachment; filename=video.mp4"
+            # Extract info without downloading yet
+            info = ydl.extract_info(url, download=False)
+            
+            return {
+                "status": "success",
+                "title": info.get("title", "No Title"),
+                "thumbnail": info.get("thumbnail"),
+                "video_url": info.get("url"), # Direct download link
+                "platform": info.get("extractor_key"),
+                "duration": info.get("duration")
             }
-        )
-
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    import uvicorn
+    # Use 0.0.0.0 so you can access it from your phone/other devices
+    uvicorn.run(app, host="0.0.0.0", port=8000)
