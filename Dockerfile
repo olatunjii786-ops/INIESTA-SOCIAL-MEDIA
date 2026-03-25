@@ -19,4 +19,4 @@ COPY . .
 
 # Start the FastAPI server using Uvicorn
 # Render uses the $PORT environment variable automatically
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT
+CMD uvicorn app:app --host 0.0.0.0 --port $PORT
