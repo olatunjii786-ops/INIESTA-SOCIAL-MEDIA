@@ -1,22 +1,11 @@
-# Use a lightweight Python image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Install system dependencies (FFmpeg is the most important)
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory
 WORKDIR /app
-
-# Copy requirements and install them
-COPY requirements.txt .
+COPY requirements.txt.
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your app code
-COPY . .
+COPY app./app
 
-# Start the FastAPI server using Uvicorn
-# Render uses the $PORT environment variable automatically
-CMD uvicorn app:app --host 0.0.0.0 --port $PORT
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
