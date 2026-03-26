@@ -1,4 +1,4 @@
-Flask
+fastapi
+uvicorn[standard]
 yt-dlp
-requests
-gunicorn
+python-multipart
