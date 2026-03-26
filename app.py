@@ -1,62 +1,54 @@
-import os
+from flask import Flask, request, Response, jsonify
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+import os
 
-app = FastAPI()
+app = Flask(__name__)
 
-COOKIE_MAP = {
-    "youtube.com": "yt_cookies.txt",
-    "youtu.be": "yt_cookies.txt",
-    "tiktok.com": "tk_cookies.txt"
-}
+COOKIES_FILE = "cookies.txt"
 
-def get_cookie_file(url):
-    url_lower = url.lower()
-    for domain in COOKIE_MAP:
-        if domain in url_lower:
-            filename = COOKIE_MAP[domain]
-            if os.path.exists(filename):
-                return filename
-    return None
+@app.route("/")
+def home():
+    return "Server is running"
 
-@app.get("/fetch")
-def fetch_video(url: str):
+@app.route("/download")
+def download():
+    url = request.args.get("url")
+
     if not url:
-        raise HTTPException(status_code=400, detail="No URL provided")
+        return jsonify({"error": "No URL provided"}), 400
 
-    cookie_path = get_cookie_file(url)
+    def generate():
+        ydl_opts = {
+            "format": "best",
+            "cookiefile": COOKIES_FILE,
+            "quiet": True,
+            "noplaylist": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            },
+        }
 
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        # This is more compatible with different platforms
-        'format': 'best', 
-        # Crucial: Pretend to be a real Chrome browser
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                direct_url = info["url"]
 
-    if cookie_path:
-        ydl_opts['cookiefile'] = cookie_path
+            import requests
+            with requests.get(direct_url, stream=True) as r:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # YouTube sometimes hides the URL inside 'formats'
-            download_url = info.get("url")
-            if not download_url and "formats" in info:
-                download_url = info["formats"][-1].get("url")
+        except Exception as e:
+            yield f"ERROR: {str(e)}".encode()
 
-            return {
-                "status": "success",
-                "title": info.get("title", "Video"),
-                "thumbnail": info.get("thumbnail"),
-                "download_url": download_url
-            }
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+    return Response(
+        generate(),
+        mimetype="application/octet-stream",
+        headers={
+            "Content-Disposition": "attachment; filename=video.mp4"
+        },
+    )
 
-@app.get("/")
-def health():
-    return {"status": "online"}
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
