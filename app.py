@@ -1,43 +1,42 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
-import yt_dlp
-import os
-import uuid
+import requests
 
 app = FastAPI()
 
 class DownloadRequest(BaseModel):
     url: str
-    quality: str = "best"   # default to best
+    quality: str = "best"   # "best" or "720", "480", etc.
 
 @app.post("/download")
 def download_video(req: DownloadRequest):
-    filename = f"/tmp/{uuid.uuid4()}.mp4"
+    # Map your "best" to Cobalt's "max"
+    cobalt_quality = "max" if req.quality == "best" else req.quality.replace("p", "")
 
-    # Build format string
-    fmt = "bestvideo+bestaudio/best" if req.quality == "best" else f"best[height<={req.quality.replace('p','')}]"
+    payload = {
+        "url": req.url,
+        "vQuality": cobalt_quality,
+        "aFormat": "mp3",
+        "isAudioOnly": False
+    }
 
-    ydl_opts = {
-        "outtmpl": filename,
-        "format": fmt,
-        "merge_output_format": "mp4",
-        "http_headers": {"User-Agent": "Mozilla/5.0"},
-        "noplaylist": True,
-        "retries": 5,
-        "fragment_retries": 5,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
-        "cookiefile": "cookies.txt",   # ← uses your uploaded cookies
-        "extractor_args": {"youtube": {"player_client": ["android"]}},  # ← avoids bot check
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([req.url])
-        return FileResponse(filename, filename="video.mp4", media_type="video/mp4")
+        resp = requests.post("https://co.wuk.sh/api/json", json=payload, headers=headers, timeout=30)
+        data = resp.json()
+
+        if data.get("status") != "success":
+            raise HTTPException(status_code=400, detail=data.get("text", "Cobalt error"))
+
+        # Cobalt returns a direct download URL
+        video_url = data["url"]
+        # Redirect the client straight to the file (fastest, no server bandwidth)
+        return RedirectResponse(video_url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+        raise HTTPException(status_code=500, detail=str(e))
