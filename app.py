@@ -1,54 +1,42 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import os, uuid, yt_dlp, shutil
-from pathlib import Path
+import yt_dlp
+import os
+import uuid
 
-app = FastAPI(title="Universal Social Media Downloader")
-DOWNLOAD_DIR = Path("downloads")
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+app = FastAPI()
 
 class DownloadRequest(BaseModel):
     url: str
-    quality: str = "best" # e.g. "best", "720p", "480p"
-
-@app.post("/info")
-def get_info(req: DownloadRequest):
-    ydl_opts = {"quiet": True, "skip_download": True}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-        return {
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "formats": [f.get("format_note") for f in info.get("formats", []) if f.get("format_note")]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    quality: str = "best"   # ← use best instead of 720p
 
 @app.post("/download")
-def download(req: DownloadRequest):
-    file_id = str(uuid.uuid4())
-    out_path = DOWNLOAD_DIR / f"{file_id}.%(ext)s"
+def download_video(req: DownloadRequest):
+    filename = f"/tmp/{uuid.uuid4()}.mp4"
+
+    # Build format string
+    if req.quality == "best":
+        fmt = "bestvideo+bestaudio/best"
+    else:
+        # e.g. "720p" → best[height<=720]
+        height = req.quality.replace("p", "")
+        fmt = f"best[height<={height}]/best"
 
     ydl_opts = {
-        "format": req.quality,
-        "outtmpl": str(out_path),
+        "outtmpl": filename,
+        "format": fmt,
         "merge_output_format": "mp4",
-        "quiet": True,
+        "http_headers": {"User-Agent": "Mozilla/5.0"},
+        "noplaylist": True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=True)
-            filename = ydl.prepare_filename(info)
-            if not filename.endswith(".mp4"):
-                filename = f"{filename}.mp4"
-        return FileResponse(filename, filename=os.path.basename(filename))
+            ydl.download([req.url])
+        return FileResponse(filename, filename="video.mp4", media_type="video/mp4")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        # clean up old files (keep disk small on free tier)
-        shutil.rmtree(DOWNLOAD_DIR, ignore_errors=True)
-        DOWNLOAD_DIR.mkdir(exist_ok=True)
+        if os.path.exists(filename):
+            os.remove(filename)
