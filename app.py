@@ -9,19 +9,14 @@ app = FastAPI()
 
 class DownloadRequest(BaseModel):
     url: str
-    quality: str = "best"   # ← use best instead of 720p
+    quality: str = "best"   # default to best
 
 @app.post("/download")
 def download_video(req: DownloadRequest):
     filename = f"/tmp/{uuid.uuid4()}.mp4"
 
     # Build format string
-    if req.quality == "best":
-        fmt = "bestvideo+bestaudio/best"
-    else:
-        # e.g. "720p" → best[height<=720]
-        height = req.quality.replace("p", "")
-        fmt = f"best[height<={height}]/best"
+    fmt = "bestvideo+bestaudio/best" if req.quality == "best" else f"best[height<={req.quality.replace('p','')}]"
 
     ydl_opts = {
         "outtmpl": filename,
@@ -29,6 +24,12 @@ def download_video(req: DownloadRequest):
         "merge_output_format": "mp4",
         "http_headers": {"User-Agent": "Mozilla/5.0"},
         "noplaylist": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        "cookiefile": "cookies.txt",   # ← uses your uploaded cookies
+        "extractor_args": {"youtube": {"player_client": ["android"]}},  # ← avoids bot check
     }
 
     try:
