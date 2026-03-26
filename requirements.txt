@@ -1,3 +1,5 @@
-fastapi
-uvicorn
-requests
+Flask==2.3.3
+Flask-CORS==4.0.0
+yt-dlp
+gunicorn==21.2.0
+curl-cffi
