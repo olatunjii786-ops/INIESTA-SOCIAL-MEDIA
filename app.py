@@ -1,52 +1,78 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from flask import Flask, request, Response, jsonify
+import yt_dlp
+from pytube import YouTube
 import requests
 
-app = FastAPI()
+app = Flask(__name__)
 
-class DownloadRequest(BaseModel):
-    url: str
-    quality: str = "best"
+COOKIES_FILE = "cookies.txt"
 
-@app.get("/")
-def health():
-    return {"status": "ok"}
+@app.route("/")
+def home():
+    return "Hybrid downloader running"
 
-@app.post("/download")
-def download_video(req: DownloadRequest):
-    # Cobalt expects "max" for best quality
-    cobalt_quality = "max" if req.quality == "best" else req.quality.replace("p", "")
+@app.route("/download")
+def download():
+    url = request.args.get("url")
 
-    payload = {
-        "url": req.url,
-        "vQuality": cobalt_quality
-    }
+    if not url:
+        return jsonify({"error": "No URL"}), 400
 
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
-
+    # 🔹 FIRST: Try yt-dlp
     try:
-        resp = requests.post("https://co.wuk.sh/api/json",
-                             json=payload,
-                             headers=headers,
-                             timeout=30)
+        def stream_yt_dlp():
+            ydl_opts = {
+                "format": "best",
+                "cookiefile": COOKIES_FILE,
+                "quiet": True,
+                "noplaylist": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0"
+                },
+            }
 
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502,
-                                detail=f"Cobalt returned {resp.status_code}: {resp.text}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_url = info["url"]
 
-        data = resp.json()
+            r = requests.get(video_url, stream=True)
+            for chunk in r.iter_content(8192):
+                if chunk:
+                    yield chunk
 
-        if data.get("status") != "success":
-            raise HTTPException(status_code=400,
-                                detail=data.get("text", "Cobalt failed"))
+        return Response(
+            stream_yt_dlp(),
+            mimetype="application/octet-stream",
+            headers={"Content-Disposition": "attachment; filename=video.mp4"}
+        )
 
-        # Send the phone straight to the file
-        return RedirectResponse(data["url"])
+    except Exception as e:
+        print("yt-dlp failed:", e)
 
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Request to Cobalt failed: {e}")
+    # 🔹 SECOND: Fallback to pytube (YouTube only)
+    try:
+        if "youtube.com" in url or "youtu.be" in url:
+            yt = YouTube(url)
+            stream = yt.streams.get_highest_resolution()
+            video_url = stream.url
+
+            def stream_pytube():
+                r = requests.get(video_url, stream=True)
+                for chunk in r.iter_content(8192):
+                    if chunk:
+                        yield chunk
+
+            return Response(
+                stream_pytube(),
+                mimetype="application/octet-stream",
+                headers={"Content-Disposition": "attachment; filename=video.mp4"}
+            )
+
+    except Exception as e:
+        print("pytube failed:", e)
+
+    return jsonify({"error": "Download failed"}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
