@@ -4,8 +4,6 @@ from fastapi import FastAPI, HTTPException
 
 app = FastAPI()
 
-# Map the domains to your secret cookie files
-# Make sure these filenames match exactly what you set in Render Secret Files
 COOKIE_MAP = {
     "youtube.com": "yt_cookies.txt",
     "youtu.be": "yt_cookies.txt",
@@ -28,14 +26,13 @@ def fetch_video(url: str):
 
     cookie_path = get_cookie_file(url)
 
-    # yt-dlp Configuration
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        # FIX: 'best[ext=mp4]' forces yt-dlp to find a single-link MP4 
-        # or merge them into one playable stream URL.
-        'format': 'best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
+        # This is more compatible with different platforms
+        'format': 'best', 
+        # Crucial: Pretend to be a real Chrome browser
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     }
 
     if cookie_path:
@@ -43,29 +40,23 @@ def fetch_video(url: str):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # We use download=False to get the metadata and the direct URL
             info = ydl.extract_info(url, download=False)
             
-            # For YouTube specifically, if 'url' is missing in the root, 
-            # we grab it from the requested formats.
+            # YouTube sometimes hides the URL inside 'formats'
             download_url = info.get("url")
             if not download_url and "formats" in info:
-                # Fallback to the last (usually best) format entry if needed
                 download_url = info["formats"][-1].get("url")
 
             return {
                 "status": "success",
-                "title": info.get("title", "Universal Video"),
+                "title": info.get("title", "Video"),
                 "thumbnail": info.get("thumbnail"),
-                "download_url": download_url,
-                "platform": info.get("extractor_key"),
-                "duration": info.get("duration")
+                "download_url": download_url
             }
     except Exception as e:
-        # This will help you see the exact error in Render logs
-        print(f"Error fetching {url}: {str(e)}")
+        print(f"ERROR: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/")
-def health_check():
-    return {"message": "Universal Downloader Backend is running!"}
+def health():
+    return {"status": "online"}
